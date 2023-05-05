@@ -1,42 +1,58 @@
+# -----------------------------------------------------------------------------
+# Copyright (C) 2019-2022 The python-ndn authors
+#
+# This file is part of python-ndn.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# -----------------------------------------------------------------------------
 import logging
+from ndn import utils, appv2, types
+from ndn import encoding as enc
 
-import ndn.types
-from ndn.app import NDNApp
 
-logger = logging.getLogger()
-handler = logging.StreamHandler()
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logging.basicConfig(format='[{asctime}]{levelname}:{message}',
+                    datefmt='%Y-%m-%d %H:%M:%S',
+                    level=logging.INFO,
+                    style='{')
 
-app = NDNApp()
+
+app = appv2.NDNApp()
 
 
 async def main():
     try:
-        data_name, meta_info, content = await app.express_interest(
-            # Interest Name
-            '/example/Ping2',
-            must_be_fresh=True,
-            can_be_prefix=False,
-            # Interest lifetime in ms
-            lifetime=6000)
-        # Print out Data Name, MetaInfo and its content.
-        logger.info(f'Received Data Name: { data_name}')
-        logger.info(f'MEtadata Information {meta_info}')
+        timestamp = utils.timestamp()
+        name = enc.Name.from_str('/example/testApp/randomData') + [enc.Component.from_timestamp(timestamp)]
+        print(f'Sending Interest {enc.Name.to_str(name)}, {enc.InterestParam(must_be_fresh=True, lifetime=6000)}')
+        # TODO: Write a better validator
+        data_name, content, pkt_context = await app.express(
+            name, validator=appv2.pass_all,
+            must_be_fresh=True, can_be_prefix=False, lifetime=6000, no_signature=True)
+
+        print(f'Received Data Name: {enc.Name.to_str(data_name)}')
+        print(pkt_context['meta_info'])
         print(bytes(content) if content else None)
-    except ndn.types.InterestNack as e:
-        # A NACK is received
+    except types.InterestNack as e:
         print(f'Nacked with reason={e.reason}')
-    except ndn.types.InterestTimeout:
-        # Interest times out
-        logger.error(f'Timeout')
-    except ndn.types.InterestCanceled:
-        # Connection to NFD is broken
-        logger.error(f'Canceled')
-    except ndn.types.ValidationFailure:
-        # Validation failure
-        logger.error(f'Data failed to validate')
+    except types.InterestTimeout:
+        print(f'Timeout')
+    except types.InterestCanceled:
+        print(f'Canceled')
+    except types.ValidationFailure:
+        print(f'Data failed to validate')
     finally:
         app.shutdown()
 
-app.run_forever(after_start=main())
+
+if __name__ == '__main__':
+    app.run_forever(after_start=main())
