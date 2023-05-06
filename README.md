@@ -129,7 +129,7 @@ fabric_slice.list_nodes()
 
 Our FABRIC VM Topology is the following:
 
-
+![](./images/fabric-ndn_2.png)
 
 ### The commands to setup the NDN-DPDK Dependencies and the Program (Manual Via SSH)
 
