@@ -165,7 +165,7 @@ ndndpdk-ctrl version v0.0.0-20230411150822-eae4b29557ea
 ### Setting up NDN-DPDK as a forwarder
 
 We need to manually program ndn-dpdk to act as a forwarder AND then link the 2 NDN DPDK instances together. After the NDN-DPDK program has been configured to work in the forwarder mode, we need to create `eth-port` and an `eth-face`. The creation of the `eth-port` assigns the shared-nic present on the system to be controlled by the DPDK program using one of the `pci`, `A_NET` or the `XDP` drivers (the commands below chose the `PCI` driver since it is the fastest and also the one compatible with the NVIDIA Mellanox Connect-X6 cards used in FABRIC [Network Hardware](https://learn.fabric-testbed.net/knowledge-base/network-interfaces-in-fabric-vms/)). One `eth-port` instance can be associated with multiple `eth-iface` instances. The `eth-face` is a generalization of a network interface, which is used by NDN-DPDK programs to connect and forward application. more here: [https://github.com/usnistgov/ndn-dpdk/blob/main/docs/face.md](https://github.com/usnistgov/ndn-dpdk/blob/main/docs/face.md).
-Think of each `eth-face` as a dedicated connection to the other node. We have to run the following commands on every pair of NDN-DPDK instances that we want to connect to each other. The `echo {} | ndndpdk-ctrl activate-forwarder` command only has to be run once per VM. The rest of the commands have to be every time a new `face` is added to the instance that is running the NDN-DPDK program. 
+Think of each `eth-face` as a dedicated connection to the other node. We have to run the following commands on every pair of NDN-DPDK instances that we want to connect to each other. The `echo {} | ndndpdk-ctrl activate-forwarder` command only has to be run once per VM. The rest of the commands have to be every time a new interface is added to the instance that is running the NDN-DPDK program. the `mtu` parameter activates jumbo layer-2 frames.
 ```bash
 echo {} | ndndpdk-ctrl activate-forwarder
 sudo ndndpdk-ctrl create-eth-port --pci <INTERFACE INDEX> # replace <interface index> with the following format
@@ -752,13 +752,246 @@ and the following output on the consumer side
 and we see the NFD forwarded the interest successfully, and the consumer receives the two beautiful words that every computer engineer/scientist yearns to read! Hello World.
 
 
-### Our Program: Across the Network.
+### Our Program HUFFPOST ARCHIVES: Across the Network.
+We created a route from nfd on node2 to the nfd on node1 with the prefix `/huffpost/archives` for our toy archive program. the commands for routes have not been shown for brevity.
+Our producer program is shown below. it uses the news dataset form kaggle, and some of the important features of this producer program is that it will respond to interests with the prefix pattern `/huffpost/archives/YYYY/MM/DD` with the articles that were published on that date. It uses the `sqlite3` library to achieve this task. it first reads the 200K articles intosqlite table which is indexed by the date field, and then starts listening for the `/huffpost/archives` prefix. 
 
-using our success we drafted the 
+```bash
+# huffpost_producer.py
+import logging
+import typing
+import json
+from datetime import datetime
+import sqlite3
+import sys
+import re
+from ndn import appv2
+from ndn import encoding as enc
+from ndn.security.keychain.keychain_digest import KeychainDigest
+
+logging.basicConfig(format='[{asctime}]{levelname}:{message}', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO,
+                    style='{')
+
+app = appv2.NDNApp()
+keychain = KeychainDigest()
+signer = keychain.get_signer({})
+
+conn: sqlite3.Connection
+cur: sqlite3.Cursor
+
+date_pattern = "^huffpost/archives/[0-9]{4}\\/[0-9]{1,2}\\/[0-9]{1,2}$"
 
 
-### Increase Slice Retention Time
-More often than not the experiments involving NDN take time, so it is useful to extend the duraiton fo your slice. This code snippet extends the lenght of your slice by 14 days - change the num_days parameter to extend your slice.
+@app.route('/huffpost/archives')
+def on_interest(name: enc.FormalName, _app_param: typing.Optional[enc.BinaryStr],
+                reply: appv2.ReplyFunc, context: appv2.PktContext):
+    user_interest = enc.Name.to_str(name)
+    content = match_interest_to_articles(user_interest)
+    print(f'>> I: {enc.Name.to_str(name)}, {context["int_param"]}')
+    if content:
+        content = content.encode()
+    else:
+        content = '404 - NOT FOUND! Please send a Valid Date'.encode()
+    reply(app.make_data(name, content=content, signer=signer,
+                        freshness_period=100000))
+    print(f'<< D: {enc.Name.to_str(name)}')
+    print(enc.MetaInfo(freshness_period=100000))
+    print(f'Content: (size: {len(content)})')
+    print('')
+
+
+def match_interest_to_articles(user_interest: str):
+    global conn, cur
+    logging.info(f'Looking up the articles for user interest {user_interest}')
+    logging.info("pattern matching the interest to ensure correct range of dates")
+    result_pattern = re.findall(date_pattern, user_interest)
+    if len(result_pattern) == 0:
+        logging.info("Discarding invalid Interest for article date search - does not conform to standards")
+        logging.info(f"INV_I << {user_interest}")
+        return None
+    else:
+        logging.info("Interest matches the expected lookup pattern - Isolating the date")
+        result_pattern_tokens = result_pattern[0].split('/')
+        year = result_pattern_tokens[2]
+        month = result_pattern_tokens[3]
+        day = result_pattern_tokens[4]
+        logging.info(f"Date extracted: {year}-{month}-{day} - Querying articles for that time")
+        result_query = cur.execute(f"SELECT * FROM news_archive na WHERE article_date = "
+                                   f"DATE(\'{year}-{month}-{day}\');")
+        result_string = ''
+        item_num = 0
+        for result in result_query.fetchall():
+            result_string += '======================\n'
+            result_string = result_string + f'article_date: {result[0]}\n'
+            result_string = result_string + f'link: {result[1]}\n'
+            result_string = result_string + f'headline: {result[2]}\n'
+            result_string = result_string + f'category: {result[3]}\n'
+            result_string = result_string + f'authors: {result[4]}\n'
+            result_string = result_string + f'short_description: {result[5]}\n'
+            result_string += '======================\n'
+            item_num += 1
+        if item_num:
+            logging.info(f'Found {item_num+1} news items! Sending back to client')
+            return result_string
+        else:
+            logging.info("No news items were found for that date - returning None")
+            return None
+
+
+def setup_news_table():
+    global conn, cur
+    try:
+        logging.info("Setting up the SQLite Database")
+        conn = sqlite3.connect("news_archive.db")
+        cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS news_archive")
+        cur.execute("CREATE TABLE news_archive(article_date, link, headline, category, authors, short_description)")
+        cur.execute("CREATE INDEX article_date_index ON news_archive(article_date) ")
+        # TODO: offer search by author by indexing the author names.
+        # cur.execute("CREATE INDEX article_authors_index ON news_archive(authors) ")
+        logging.info("Successfully created the table for news_archive in our SQLITE3 Database")
+    except Exception:
+        logging.error("Encountered Exception while building the database.")
+        logging.error(sys.exc_info())
+        exit(1)
+
+
+def read_dataset():
+    global conn, cur
+    try:
+        cur = conn.cursor()
+        news_list = []
+        logging.info("Reading the news dataset")
+        with open('News_Category_Dataset_v3.json', 'r') as news_file:
+            logging.info("Reading the file \'News_Category_Dataset_v3.json\'")
+            for line in news_file.readlines():
+                news_item = json.loads(line)
+                news_list.append((datetime.strptime(news_item['date'], '%Y-%m-%d').date(), news_item['link'],
+                                  news_item['headline'], news_item['category'], news_item['authors'],
+                                  news_item['short_description']))
+            cur.executemany("INSERT INTO news_archive VALUES (?, ? , ?, ?, ?, ?)", news_list)
+            conn.commit()
+            logging.info("Successfully finished reading the news data into the sqlite database!")
+    except FileNotFoundError:
+        logging.error("Could not find file for the news dataset from kaggle - please download and unzip the file as\n"
+                      "\'News_Category_Dataset_v3.json\' in the same directory as this program. available at:\n"
+                      "https://www.kaggle.com/datasets/rmisra/news-category-dataset")
+        logging.error(sys.exc_info())
+        exit(1)
+    except sqlite3.OperationalError:
+        logging.error("Encountered error while feeding news articles into Sqlite3 DB")
+        logging.error(sys.exc_info())
+        exit()
+    except Exception as err:
+        logging.error("Suffered from error - while reading file. Cannot Continue")
+        logging.debug(sys.exc_info())
+        exit()
+    finally:
+        news_file.close()
+
+
+if __name__ == '__main__':
+    setup_news_table()
+    read_dataset()
+    app.run_forever()
+
+```
+WE start the program with `python3 huffpost_producer.py` and see the following output:
+```bash
+# output on the console
+root@e6ca51d6f22a:~# python3 huffpost_producer.py 
+[2023-05-06 05:01:51]INFO:Setting up the SQLite Database
+[2023-05-06 05:01:51]INFO:Successfully created the table for news_archive in our SQLITE3 Database
+[2023-05-06 05:01:51]INFO:Reading the news dataset
+[2023-05-06 05:01:51]INFO:Reading the file 'News_Category_Dataset_v3.json'
+[2023-05-06 05:01:55]INFO:Successfully finished reading the news data into the sqlite database!
+
+#output of the NFD process on Node 1 -registering the route. 
+1683349315.572415  INFO: [nfd.FaceTable] Added face id=259 remote=fd://18 local=unix:///run/ndn/nfd.sock
+1683349315.573489  INFO: [nfd.RibManager] Adding route /huffpost/archives nexthop=259 origin=app cost=0
+```
+
+The complimentary consumer program is shown below - it is not much different form the sample program except for the fact that is taking the date from the user as an cli argument in the `YYYY-MM-DD` format and sending that interest to the consumer. At first we send the input `python3 huffpost_consumer.py`
+
+```bash
+import logging
+import sys
+import re
+from ndn import utils, appv2, types
+from ndn import encoding as enc
+
+
+logging.basicConfig(format='[{asctime}]{levelname}:{message}',
+                    datefmt='%Y-%m-%d %H:%M:%S',
+                    level=logging.INFO,
+                    style='{')
+
+# accept and check the cli args
+date_pattern = '^[0-9]{4}\\-[0-9]{1,2}\\-[0-9]{1,2}$$'
+if len(sys.argv) != 2:
+    print('Insufficient arguments - please run the program with the date in the following format: '
+          '\'python huffpost_consumer.py YYYY-MM-DD\'')
+    sys.exit(-1)
+
+requester_date = sys.argv[1]
+check_date = re.findall(date_pattern, requester_date)
+if len(check_date) == 0:
+    print('Insufficient arguments - please run the program with the date in the following format: '
+          '\'python huffpost_consumer.py YYYY-MM-DD\'')
+    sys.exit(-1)
+
+interest_date = requester_date.replace('-', '/')
+# initialize the NDNApp
+
+app = appv2.NDNApp()
+
+
+async def main():
+    global requester_date
+    try:
+        name = enc.Name.from_str(f'/huffpost/archives/{interest_date}')
+        print(f'Sending Interest {enc.Name.to_str(name)}, {enc.InterestParam(must_be_fresh=True, lifetime=60000)}')
+        # TODO: Write a better validator
+        data_name, content, pkt_context = await app.express(
+            name, validator=appv2.pass_all,
+            must_be_fresh=True, can_be_prefix=False, lifetime=60000, no_signature=True)
+
+        print(f'Received Data Name: {enc.Name.to_str(data_name)}')
+        print(pkt_context['meta_info'])
+        print(bytes(content).decode() if content else None)
+    except types.InterestNack as e:
+        print(f'Nacked with reason={e.reason}')
+    except types.InterestTimeout:
+        print(f'Timeout')
+    except types.InterestCanceled:
+        print(f'Canceled')
+    except types.ValidationFailure:
+        print(f'Data failed to validate')
+    finally:
+        app.shutdown()
+
+
+if __name__ == '__main__':
+    app.run_forever(after_start=main())
+```
+
+We run the `python3 huffpost_consumer.py 2021-02-04` and see that we get the articles as outputs. The images for those outputs are shown below:
+
+![](./images/huffpost-consumer_article_1.png)
+
+*Consumer showing article for 2021-20-04*
+
+![](./images/huffpost-producer_article_1.png)
+
+*Producer showing article for 2021-20-04*
+
+![](./images/huffpost-consumer_article_2.png)
+
+*Producer showing article for 2021-20-04*
+
+![](./images/huffpost-producer_article_2.png)
+
+*Producer showing article for 2021-20-04)*
 
 
 ```python
