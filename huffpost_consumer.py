@@ -1,4 +1,6 @@
 import logging
+import sys
+import re
 from ndn import utils, appv2, types
 from ndn import encoding as enc
 
@@ -8,23 +10,39 @@ logging.basicConfig(format='[{asctime}]{levelname}:{message}',
                     level=logging.INFO,
                     style='{')
 
+# accept and check the cli args
+date_pattern = '^[0-9]{4}\\-[0-9]{1,2}\\-[0-9]{1,2}$$'
+if len(sys.argv) != 2:
+    print('Insufficient arguments - please run the program with the date in the following format: '
+          '\'python huffpost_consumer.py YYYY-MM-DD\'')
+    sys.exit(-1)
+
+requester_date = sys.argv[1]
+check_date = re.findall(date_pattern, requester_date)
+if len(check_date) == 0:
+    print('Insufficient arguments - please run the program with the date in the following format: '
+          '\'python huffpost_consumer.py YYYY-MM-DD\'')
+    sys.exit(-1)
+
+interest_date = requester_date.replace('-', '/')
+# initialize the NDNApp
 
 app = appv2.NDNApp()
 
 
 async def main():
+    global requester_date
     try:
-        timestamp = utils.timestamp()
-        name = enc.Name.from_str('/huffpost/archives/randomData') + [enc.Component.from_timestamp(timestamp)]
-        print(f'Sending Interest {enc.Name.to_str(name)}, {enc.InterestParam(must_be_fresh=True, lifetime=6000)}')
+        name = enc.Name.from_str(f'/huffpost/archives/{interest_date}')
+        print(f'Sending Interest {enc.Name.to_str(name)}, {enc.InterestParam(must_be_fresh=True, lifetime=60000)}')
         # TODO: Write a better validator
         data_name, content, pkt_context = await app.express(
             name, validator=appv2.pass_all,
-            must_be_fresh=True, can_be_prefix=False, lifetime=6000, no_signature=True)
+            must_be_fresh=True, can_be_prefix=False, lifetime=60000, no_signature=True)
 
         print(f'Received Data Name: {enc.Name.to_str(data_name)}')
         print(pkt_context['meta_info'])
-        print(bytes(content) if content else None)
+        print(bytes(content).decode() if content else None)
     except types.InterestNack as e:
         print(f'Nacked with reason={e.reason}')
     except types.InterestTimeout:
